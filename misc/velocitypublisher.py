@@ -29,8 +29,8 @@ class VelocityPublisher(Node):
     def timer_callback(self):
 
         msg = Twist()
-        msg.linear.x = 0.5 
-        msg.angular.z = 0.1 
+        msg.linear.x = 1
+        msg.angular.z = 0.5
 
         self.publisher_.publish(msg)
         self.get_logger().info(f'Publishing: linear.x = {msg.linear.x}, angular.z = {msg.angular.z}')
