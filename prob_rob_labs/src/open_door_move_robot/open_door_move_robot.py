@@ -17,6 +17,14 @@ class OpenDoorMoveRobot(Node):
         super().__init__('open_door_move_robot')
         self.log = self.get_logger()
 
+
+
+        self.declare_parameter('robot_speed', 0.5)
+        self.robot_speed = self.get_parameter('robot_speed').get_parameter_value().double_value
+        self.log.info(f'Robot speed this time: {self.robot_speed}')
+
+
+
         self.pub_door = self.create_publisher(Empty, '/door_open', 1)
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 1)
         self.pub_door_torque = self.create_publisher(Float64, '/hinged_glass_door/torque', 1)
@@ -40,7 +48,14 @@ class OpenDoorMoveRobot(Node):
         elif self.step == 1:
             self.log.info('Step 2: Moving the robot forward')
             move_cmd = Twist()
-            move_cmd.linear.x = 0.5  # move forward
+
+
+
+            move_cmd.linear.x = self.robot_speed
+            # move_cmd.linear.x = 0.5
+
+
+
             self.pub_cmd_vel.publish(move_cmd)
             if elapsed >= t_robot_move:
                 self.step += 1
