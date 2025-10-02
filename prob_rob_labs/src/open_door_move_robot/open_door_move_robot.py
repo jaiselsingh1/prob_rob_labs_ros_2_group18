@@ -17,21 +17,26 @@ class OpenDoorMoveRobot(Node):
         super().__init__('open_door_move_robot')
         self.log = self.get_logger()
 
-
-
         self.declare_parameter('robot_speed', 0.5)
         self.robot_speed = self.get_parameter('robot_speed').get_parameter_value().double_value
         self.log.info(f'Robot speed this time: {self.robot_speed}')
-
-
 
         self.pub_door = self.create_publisher(Empty, '/door_open', 1)
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 1)
         self.pub_door_torque = self.create_publisher(Float64, '/hinged_glass_door/torque', 1)
 
         self.step = 0
+        
+        self.feature_mean = self.create_subscription(Float64, '/feature_mean', self.feature_mean_callback, 10)
+        # store it as a class attribute
+        self.feature_mean_value = 0.0 
+        
         self.start_time = self.get_clock().now().seconds_nanoseconds()[0]
         self.timer = self.create_timer(heartbeat_period, self.heartbeat)
+    
+    def feature_mean_callback(self, msg):
+        self.feature_mean_value = msg.data
+        self.log.info(f'Feature mean value: {self.feature_mean_value}')
 
     def heartbeat(self):
         # self.log.info('heartbeat')
@@ -41,20 +46,22 @@ class OpenDoorMoveRobot(Node):
         if self.step == 0:
             self.log.info('Step 1: Opening the door')
             self.pub_door_torque.publish(Float64(data=10.0))
-            if elapsed >= t_door_open:
+            
+            if self.feature_mean_value > 280:  # Adjust the threshold as needed
+                self.pub_door.publish(Empty())
+                self.log.info('Door open command published based on feature mean value')
                 self.step += 1
                 self.start_time = current_time
+            # if elapsed >= t_door_open:
+            #     self.step += 1
+            #     self.start_time = current_time
 
         elif self.step == 1:
             self.log.info('Step 2: Moving the robot forward')
             move_cmd = Twist()
 
-
-
             move_cmd.linear.x = self.robot_speed
             # move_cmd.linear.x = 0.5
-
-
 
             self.pub_cmd_vel.publish(move_cmd)
             if elapsed >= t_robot_move:
