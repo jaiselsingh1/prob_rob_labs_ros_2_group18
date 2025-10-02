@@ -26,11 +26,11 @@ class OpenDoorMoveRobot(Node):
         self.pub_door_torque = self.create_publisher(Float64, '/hinged_glass_door/torque', 1)
 
         self.step = 0
-        
-        self.feature_mean = self.create_subscription(Float64, '/feature_mean', self.feature_mean_callback, 10)
+
         # store it as a class attribute
         self.feature_mean_value = 0.0 
-        
+        self.feature_mean = self.create_subscription(Float64, '/feature_mean', self.feature_mean_callback, 10)
+
         self.start_time = self.get_clock().now().seconds_nanoseconds()[0]
         self.timer = self.create_timer(heartbeat_period, self.heartbeat)
     
@@ -47,7 +47,7 @@ class OpenDoorMoveRobot(Node):
             self.log.info('Step 1: Opening the door')
             self.pub_door_torque.publish(Float64(data=10.0))
             
-            if self.feature_mean_value > 280:  # Adjust the threshold as needed
+            if self.feature_mean_value < 280:  # Adjust the threshold as needed
                 self.pub_door.publish(Empty())
                 self.log.info('Door open command published based on feature mean value')
                 self.step += 1
@@ -64,7 +64,7 @@ class OpenDoorMoveRobot(Node):
             # move_cmd.linear.x = 0.5
 
             self.pub_cmd_vel.publish(move_cmd)
-            if elapsed >= t_robot_move:
+            if elapsed >= 10.0:
                 self.step += 1
                 self.start_time = current_time
 
