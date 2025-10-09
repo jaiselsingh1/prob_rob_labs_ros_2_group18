@@ -33,6 +33,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'door_state_estimator = door_state_estimator.door_state_estimator:main',
             'open_door_move_robot = open_door_move_robot.open_door_move_robot:main',
             'image_mean_feature_x = image_mean_feature_x.image_mean_feature_x:main',
             'flaky_door_opener = flaky_door_opener.flaky_door_opener:main',
