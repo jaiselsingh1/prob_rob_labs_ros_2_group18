@@ -1,6 +1,6 @@
 #!/bin/bash
 
-STATE_DIR=/var/lib/ros2_distrobox_install
+STATE_DIR=/var/lib/ros2_install
 STATE_FILE=state
 script_name=$(basename $0)
 ROS_RELEASE=humble
