@@ -17,9 +17,33 @@ class OpenDoorMoveRobot(Node):
         super().__init__('open_door_move_robot')
         self.log = self.get_logger()
 
+        # basic parameters
         self.declare_parameter('robot_speed', 0.5)
         self.robot_speed = self.get_parameter('robot_speed').get_parameter_value().double_value
         self.log.info(f'Robot speed this time: {self.robot_speed}')
+
+        # Bayesian decision parameters
+        # measurement_threshold: numerical cutoff to map feature_mean -> observed z (True means z=open)
+        self.declare_parameter('measurement_threshold', 238.0)
+        # if True, z=open when feature_mean < measurement_threshold (keeps legacy behavior)
+        self.declare_parameter('z_open_when_below', True)
+        self.declare_parameter('bayes_decision_threshold', 0.999)
+        self.declare_parameter('prior_open', 0.5)
+        # conditional probabilities (from your values)
+        self.declare_parameter('p_z_open_given_x_open', 0.947)
+        self.declare_parameter('p_z_closed_given_x_open', 0.053)
+        self.declare_parameter('p_z_open_given_x_closed', 0.042)
+        self.declare_parameter('p_z_closed_given_x_closed', 0.958)
+
+        self.measurement_threshold = float(self.get_parameter('measurement_threshold').value)
+        self.z_open_when_below = bool(self.get_parameter('z_open_when_below').value)
+        self.bayes_decision_threshold = float(self.get_parameter('bayes_decision_threshold').value)
+        self.belief_open = float(self.get_parameter('prior_open').value)
+        # probabilities
+        self.p_z_open_given_x_open = float(self.get_parameter('p_z_open_given_x_open').value)
+        self.p_z_closed_given_x_open = float(self.get_parameter('p_z_closed_given_x_open').value)
+        self.p_z_open_given_x_closed = float(self.get_parameter('p_z_open_given_x_closed').value)
+        self.p_z_closed_given_x_closed = float(self.get_parameter('p_z_closed_given_x_closed').value)
 
         self.pub_door = self.create_publisher(Empty, '/door_open', 1)
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 1)
@@ -35,8 +59,34 @@ class OpenDoorMoveRobot(Node):
         self.timer = self.create_timer(heartbeat_period, self.heartbeat)
     
     def feature_mean_callback(self, msg):
+        # update measurement and Belief using Bayesian update
         self.feature_mean_value = msg.data
-        self.log.info(f'Feature mean value: {self.feature_mean_value}')
+        # map measurement to observed z (open/closed)
+        if self.z_open_when_below:
+            z_open = (self.feature_mean_value < self.measurement_threshold)
+        else:
+            z_open = (self.feature_mean_value >= self.measurement_threshold)
+
+        # compute likelihoods P(z | x=open) and P(z | x=closed)
+        if z_open:
+            p_z_given_x_open = self.p_z_open_given_x_open
+            p_z_given_x_closed = self.p_z_open_given_x_closed
+        else:
+            p_z_given_x_open = self.p_z_closed_given_x_open
+            p_z_given_x_closed = self.p_z_closed_given_x_closed
+
+        prior = self.belief_open
+        numerator = p_z_given_x_open * prior
+        denominator = numerator + p_z_given_x_closed * (1.0 - prior)
+        if denominator > 0.0:
+            posterior = numerator / denominator
+        else:
+            posterior = prior
+
+        # update belief (recursive Bayesian update)
+        self.belief_open = posterior
+
+        self.log.info(f'Feature mean: {self.feature_mean_value:.1f} z_open={z_open} belief_open={self.belief_open:.3f}')
 
     def heartbeat(self):
         # self.log.info('heartbeat')
@@ -46,10 +96,10 @@ class OpenDoorMoveRobot(Node):
         if self.step == 0:
             self.log.info('Step 1: Opening the door')
             self.pub_door_torque.publish(Float64(data=10.0))
-            
-            if self.feature_mean_value < 280:  # Adjust the threshold as needed
+            # Decide using Bayesian posterior probability
+            if self.belief_open >= self.bayes_decision_threshold:
                 self.pub_door.publish(Empty())
-                self.log.info('Door open command published based on feature mean value')
+                self.log.info(f'Door open command published (belief_open={self.belief_open:.3f} >= {self.bayes_decision_threshold})')
                 self.step += 1
                 self.start_time = current_time
             # if elapsed >= t_door_open:
