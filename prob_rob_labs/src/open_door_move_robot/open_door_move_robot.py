@@ -30,7 +30,7 @@ class OpenDoorMoveRobot(Node):
         self.declare_parameter('p_z_closed_given_x_closed', 0.958)
 
         # transition model and attempt rate
-        self.declare_parameter('p_open_success', 0.167)
+        self.declare_parameter('p_open_success', 0.66)
         self.declare_parameter('p_open_spontaneous', 0.0)
         self.declare_parameter('p_stay_open', 0.99)
         self.declare_parameter('attempt_interval', 0.5)
