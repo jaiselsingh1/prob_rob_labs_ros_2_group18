@@ -33,6 +33,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'ground_truth_from_link_states = ground_truth_from_link_states.ground_truth_from_link_states:main',
             'door_state_estimator = door_state_estimator.door_state_estimator:main',
             'open_door_move_robot = open_door_move_robot.open_door_move_robot:main',
             'image_mean_feature_x = image_mean_feature_x.image_mean_feature_x:main',
