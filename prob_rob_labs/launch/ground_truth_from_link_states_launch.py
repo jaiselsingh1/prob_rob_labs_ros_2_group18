@@ -10,7 +10,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='set to true for simulation'),
-        DeclareLaunchArgument('ref_frame', default_value='world',
+        DeclareLaunchArgument('ref_frame', default_value='odom',
                               description='reference frame to publish ground truth in'),
         Node(
             package='prob_rob_labs',
