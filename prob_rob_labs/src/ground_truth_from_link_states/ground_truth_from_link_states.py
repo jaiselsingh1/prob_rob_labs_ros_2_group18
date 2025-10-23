@@ -4,9 +4,7 @@ from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from gazebo_msgs.msg import LinkStates
-from rclpy.qos import QoSProfile
-import tf2_geometry_msgs
-import tf2_ros
+
 
 class GroundTruthFromLinkStates(Node):
 
@@ -30,12 +28,11 @@ class GroundTruthFromLinkStates(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # Publishers
-        qos = QoSProfile(depth=10)
-        self.pub_pose = self.create_publisher(PoseStamped, '/tb3/ground_truth/pose', qos)
-        self.pub_twist = self.create_publisher(TwistStamped, '/tb3/ground_truth/twist', qos)
+        self.pub_pose = self.create_publisher(PoseStamped, '/tb3/ground_truth/pose', 1)
+        self.pub_twist = self.create_publisher(TwistStamped, '/tb3/ground_truth/twist', 1)
 
         # Subscriber
-        self.sub = self.create_subscription(LinkStates, '/gazebo/link_states', self._on_link_states, qos)
+        self.sub = self.create_subscription(LinkStates, '/gazebo/link_states', self._on_link_states, 1)
 
         self.get_logger().info(
             f'Listening to /gazebo/link_states for link="{self.link_name_param}" '
