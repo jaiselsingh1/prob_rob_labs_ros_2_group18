@@ -48,9 +48,9 @@ class OdometryTracking(Node):
         self.declare_parameter('R_diag', [0.1, 0.1, 0.1]) #[wheel_left, wheel_right, gyro_z]
         #model parameters
         self.declare_parameter('model_tau_v',1.8)
-        self.declare_parameter('model_tau_yaw',0.45)   
+        self.declare_parameter('model_tau_w',0.45)   
         self.declare_parameter('model_G_v',0.1)  
-        self.declare_parameter('model_G_yaw',0.03)   
+        self.declare_parameter('model_G_w',0.03)   
         # robot parameters
         self.declare_parameter('wheel_radius', 33)  # mm
         self.declare_parameter('wheel_separation', 143.5)  # mm
@@ -63,7 +63,7 @@ class OdometryTracking(Node):
             'odom_frame', 'base_frame',
             'init_theta', 'init_x', 'init_y', 'init_v', 'init_yaw', 'init_P_diag',
             'Q_diag', 'R_diag',
-            'model_tau_v', 'model_tau_yaw', 'model_G_v', 'model_G_yaw',
+            'model_tau_v', 'model_tau_w', 'model_G_v', 'model_G_w',
             'wheel_radius', 'wheel_separation',
             'debug'
         ])}
@@ -94,9 +94,9 @@ class OdometryTracking(Node):
         self.R_full = np.diag(np.array(params['R_diag'], dtype=float).reshape(3))      
         
         self.model_tau_v = float(params['model_tau_v'])
-        self.model_tau_yaw = float(params['model_tau_yaw'])
+        self.model_tau_w = float(params['model_tau_w'])
         self.model_G_v = float(params['model_G_v'])
-        self.model_G_yaw = float(params['model_G_yaw'])
+        self.model_G_w = float(params['model_G_w'])
         
         self.r_w = float(params['wheel_radius']) * 1e-3  # convert mm to meters
         self.R_half = float(params['wheel_separation']) * 1e-3 / 2.0 # convert mm to meters
@@ -198,7 +198,7 @@ class OdometryTracking(Node):
         self.ekf_update(imu_gyro_z, wl, wr)
         
         # ---------- Publish EKF odometry -----------
-        self._publish_odom(imu_msg.header.stamp,imu_gyro_z)
+        self._publish_odom(imu_msg.header.stamp)
         
     
     # =========== EKF Predict ============
@@ -209,15 +209,15 @@ class OdometryTracking(Node):
         u_w = float(cmd.angular.z)
         
         # a_v, a_w per handout:  a = 0.1^(dt/tau)
-        a_v = pow(0.1, dt / max(self.tau_v, 1e-6))
-        a_w = pow(0.1, dt / max(self.tau_w, 1e-6))
+        a_v = pow(0.1, dt / max(self.model_tau_v, 1e-6))
+        a_w = pow(0.1, dt / max(self.model_tau_w, 1e-6))
 
         # ---- f(x,u) ----
         theta_n = theta + w * dt
         px_n    = px + v * dt * math.cos(theta)
         py_n    = py + v * dt * math.sin(theta)
-        v_n     = a_v * v + self.G_v * (1.0 - a_v) * u_v
-        w_n = a_w * w + self.G_w * (1.0 - a_w) * u_w
+        v_n     = a_v * v + self.model_G_v * (1.0 - a_v) * u_v
+        w_n = a_w * w + self.model_G_w * (1.0 - a_w) * u_w
 
         x_pred = np.array([theta_n, px_n, py_n, v_n, w_n], dtype=float).reshape(5, 1)
         
@@ -304,8 +304,44 @@ class OdometryTracking(Node):
     
     
     # =========== Publish Odometry ============
-    def _publish_odom(self, stamp, imu_gyro_z: float):
-        pass
+    def _publish_odom(self, stamp):
+        theta, px, py, v, w = self.x.flatten()
+        qx, qy, qz, qw = yaw_to_quaternion(theta)
+        
+        msg = Odometry()
+        msg.header.stamp = stamp
+        msg.header.frame_id = self.odom_frame
+        msg.child_frame_id = self.base_frame
+        
+        # pose
+        msg.pose.pose.position.x = float(px)
+        msg.pose.pose.position.y = float(py)
+        msg.pose.pose.position.z = 0.0
+        msg.pose.pose.orientation.x = qx
+        msg.pose.pose.orientation.y = qy
+        msg.pose.pose.orientation.z = qz
+        msg.pose.pose.orientation.w = qw
+        
+        # twist: body frame
+        msg.twist.twist.linear.x = float(v)
+        msg.twist.twist.angular.z = float(w)
+        
+        #covariance mapping
+        # initialize covariances large (1e3) and then map EKF P into relevant entries
+        pose_cov = np.full((6, 6), 1e3, dtype=float)
+        twist_cov = np.full((6, 6), 1e3, dtype=float)
+        # map P -> pose(x,y,theta)
+        pose_cov[0, 0] = self.P[1, 1]  # x
+        pose_cov[1, 1] = self.P[2, 2]  # y
+        pose_cov[5, 5] = self.P[0, 0]  # theta
+        # map P -> twist(v, yaw_rate)
+        twist_cov[0, 0] = self.P[3, 3]  # v
+        twist_cov[5, 5] = self.P[4, 4]  # yaw_rate
+        
+        msg.pose.covariance = pose_cov.flatten().tolist()
+        msg.twist.covariance = twist_cov.flatten().tolist()
+        
+        self.odom_pub.publish(msg)
     
     
     def _Q(self, dt: float) -> np.ndarray:
