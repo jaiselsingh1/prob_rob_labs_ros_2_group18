@@ -40,20 +40,20 @@ class OdometryTracking(Node):
         self.declare_parameter('init_x', 0.0)
         self.declare_parameter('init_y', 0.0)
         self.declare_parameter('init_v', 0.0)
-        self.declare_parameter('init_yaw', 0.0)
-        self.declare_parameter('init_P_diag', [0.1, 0.1, 0.1, 0.1, 0.1]) #initial covariance diagonal
+        self.declare_parameter('init_w', 0.0)
+        self.declare_parameter('init_P_diag', [1e-4, 1e-4, 1e-4, 1e-3, 1e-3]) #initial covariance diagonal
         #process noise Q (diagonal)
-        self.declare_parameter('Q_diag', [0.1, 0.1, 0.1, 0.1, 0.1]) #[theta, x, y, v, yaw_rate]
+        self.declare_parameter('Q_diag', [0.5, 0.5, 0.5, 0.5, 0.5]) #[theta, x, y, v, yaw_rate]
         #measurement noise R (diagonal)
-        self.declare_parameter('R_diag', [0.1, 0.1, 0.1]) #[wheel_left, wheel_right, gyro_z]
+        self.declare_parameter('R_diag', [0.1, 0.1, 0.001]) #[wheel_left, wheel_right, gyro_z]
         #model parameters
         self.declare_parameter('model_tau_v',1.8)
         self.declare_parameter('model_tau_w',0.45)   
-        self.declare_parameter('model_G_v',0.1)  
-        self.declare_parameter('model_G_w',0.03)   
+        self.declare_parameter('model_G_v',1.0)  
+        self.declare_parameter('model_G_w',1.0)   
         # robot parameters
-        self.declare_parameter('wheel_radius', 33)  # mm
-        self.declare_parameter('wheel_separation', 143.5)  # mm
+        self.declare_parameter('wheel_radius', 0.033)  # m
+        self.declare_parameter('wheel_separation', 0.1435)  # m
         #debug flag
         self.declare_parameter('debug', False)
         
@@ -61,7 +61,7 @@ class OdometryTracking(Node):
             'imu_topic', 'joint_topic', 'cmd_topic', 'odom_topic',
             'sync_queue', 'sync_slop',
             'odom_frame', 'base_frame',
-            'init_theta', 'init_x', 'init_y', 'init_v', 'init_yaw', 'init_P_diag',
+            'init_theta', 'init_x', 'init_y', 'init_v', 'init_w', 'init_P_diag',
             'Q_diag', 'R_diag',
             'model_tau_v', 'model_tau_w', 'model_G_v', 'model_G_w',
             'wheel_radius', 'wheel_separation',
@@ -86,7 +86,7 @@ class OdometryTracking(Node):
             float(params['init_x']),
             float(params['init_y']),
             float(params['init_v']),
-            float(params['init_yaw'])
+            float(params['init_w'])
         ])  # state vector: [x, y, theta, v, yaw_rate]
         
         self.P = np.diag(np.array(params['init_P_diag'], dtype=float).reshape(5))  
@@ -98,8 +98,8 @@ class OdometryTracking(Node):
         self.model_G_v = float(params['model_G_v'])
         self.model_G_w = float(params['model_G_w'])
         
-        self.r_w = float(params['wheel_radius']) * 1e-3  # convert mm to meters
-        self.R_half = float(params['wheel_separation']) * 1e-3 / 2.0 # convert mm to meters
+        self.r_w = float(params['wheel_radius']) 
+        self.R = float(params['wheel_separation'])
         
         #-----------subscriptions and synchronization-------------
         self._cmd_mutex = threading.Lock()
@@ -126,6 +126,7 @@ class OdometryTracking(Node):
         self.get_logger().info(
             f'EKF input ready. imu="{imu_topic}", joints="{joint_topic}", '
             f'cmd="{cmd_topic}", slop={sync_slop}s, queue={sync_queue}'
+            f'wheel_radius={self.r_w}m, wheel_separation={self.R}m'
         )     
         
         # Debug logging   
@@ -153,16 +154,38 @@ class OdometryTracking(Node):
             
     #=========== 同步 imu + joint 回调函数 ============
     def _on_synced_measurements(self, imu_msg: Imu, joint_msg: JointState):
-        #use imu_msg.header.stamp as time reference
-        t_now = Time.from_msg(imu_msg.header.stamp)
-        
-        # calculate dt since last synchronized measurement
-        dt = None
+        # use imu_msg.header.stamp as time reference
+        hdr_stamp = imu_msg.header.stamp
+        # if the incoming stamp is all zeros, fall back to node clock
+        if hdr_stamp.sec == 0 and hdr_stamp.nanosec == 0:
+            t_now = self.get_clock().now()
+        else:
+            t_now = Time.from_msg(hdr_stamp)
+
+        # calculate dt since last synchronized measurement (safety checks)
         if self._last_sync_stamp is None:
             dt = 0.0
         else:
-            dt = (t_now - self._last_sync_stamp).nanoseconds * 1e-9
+            delta = t_now - self._last_sync_stamp
+            # Duration.nanoseconds is an int (may be negative if clocks jump)
+            dt = float(delta.nanoseconds) * 1e-9
+            # guard against negative or absurd dt values
+            if dt < 0.0:
+                self.get_logger().warning(f'Negative dt computed ({dt:.6f}s); clamping to 0')
+                dt = 0.0
+            elif dt > 5.0:
+                # very large gap — clamp and warn
+                self.get_logger().warning(f'Large dt computed ({dt:.3f}s); clamping to 5.0s')
+                dt = 5.0
         self._last_sync_stamp = t_now
+
+        # debug: show stamps if debug logging enabled
+        if self.get_logger().get_effective_level() <= LoggingSeverity.DEBUG:
+            try:
+                self.get_logger().debug(f'imu_stamp={hdr_stamp.sec}.{hdr_stamp.nanosec:09d} last_stamp={(self._last_sync_stamp.seconds_nanoseconds())}')
+            except Exception:
+                # ignore any formatting errors
+                pass
 
         # get last cmd_vel
         with self._cmd_mutex:
@@ -217,7 +240,7 @@ class OdometryTracking(Node):
         px_n    = px + v * dt * math.cos(theta)
         py_n    = py + v * dt * math.sin(theta)
         v_n     = a_v * v + self.model_G_v * (1.0 - a_v) * u_v
-        w_n = a_w * w + self.model_G_w * (1.0 - a_w) * u_w
+        w_n     = a_w * w + self.model_G_w * (1.0 - a_w) * u_w
 
         x_pred = np.array([theta_n, px_n, py_n, v_n, w_n], dtype=float).reshape(5, 1)
         
@@ -257,13 +280,13 @@ class OdometryTracking(Node):
         
         # left wheel
         if wl is not None:
-            rows.append([0.0, 0.0, 0.0, 1.0 / self.r_w, -self.R_half / self.r_w])
+            rows.append([0.0, 0.0, 0.0, 1.0 / self.r_w, -self.R / self.r_w])
             z_list.append(wl)
             r_list.append(self.R_full[0, 0])
         
         # right wheel
         if wr is not None:
-            rows.append([0.0, 0.0, 0.0, 1.0 / self.r_w, self.R_half / self.r_w])
+            rows.append([0.0, 0.0, 0.0, 1.0 / self.r_w, self.R / self.r_w])
             z_list.append(wr)
             r_list.append(self.R_full[1, 1])
             
