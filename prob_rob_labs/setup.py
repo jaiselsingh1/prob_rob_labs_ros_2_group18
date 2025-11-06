@@ -40,8 +40,8 @@ setup(
             'open_door_move_robot = open_door_move_robot.open_door_move_robot:main',
             'image_mean_feature_x = image_mean_feature_x.image_mean_feature_x:main',
             'flaky_door_opener = flaky_door_opener.flaky_door_opener:main',
-            'landmark_positioner = landmark_pos.landmark_positioner:main',
-            'axis_identifier = landmark_vision.axis_identifier:main'
+            'landmark_positioner = landmark_positioner.landmark_positioner:main',
+            'axis_identifier = axis_identifier.axis_identifier:main'
         ],
     }
 )
