@@ -15,17 +15,6 @@ MIN_HEIGHT_PX = 4.0
 
 
 class LandmarkPositioner(Node):
-    """
-    subscribes:
-      /vision_<color>/corners      (Point2DArrayStamped)
-      /camera/camera_info          (CameraInfo)
-      /gazebo/link_states          (LinkStates)
-
-    publishes:
-      /vision_<color>/measurement  (PointStamped: x=range [m], y=bearing [rad], z=0)
-      /vision_<color>/error        (PointStamped: x=dr [m], y=dtheta [rad], z=0)
-    """
-
     COLOR_TO_LINK = {
         'red': 'landmark_1::link',
         'green': 'landmark_2::link',
@@ -65,8 +54,6 @@ class LandmarkPositioner(Node):
         self.latest_link_states = None
         self.last_meas_time = None
 
-        self.timer = self.create_timer(HEARTBEAT_PERIOD, self.heartbeat_cb)
-
         self.create_subscription(
             Point2DArrayStamped,
             f'/vision_{self.landmark_color}/corners',
@@ -92,8 +79,12 @@ class LandmarkPositioner(Node):
         err_topic = f'/vision_{self.landmark_color}/error'
         self.err_pub = self.create_publisher(PointStamped, err_topic, 10)
 
+        self.heartbeat_timer = self.create_timer(
+            HEARTBEAT_PERIOD, self.heartbeat_cb
+        )
+
         self.log.info(
-            f'landmark_positioner for color={self.landmark_color} initialized'
+            f'landmark_positioner initialized for color={self.landmark_color}'
         )
 
     def heartbeat_cb(self):
