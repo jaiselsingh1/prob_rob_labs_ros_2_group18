@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import math
+import csv
+import os
 
 import rclpy
 from rclpy.node import Node
@@ -73,6 +75,25 @@ class LandmarkPositioner(Node):
             10,
         )
 
+        # Log topic types for diagnostics so we can detect message-type mismatches
+        try:
+            topics = self.get_topic_names_and_types()
+            topics_dict = {name: types for name, types in topics}
+            want1 = f'/vision_{self.landmark_color}/corners'
+            want2 = '/gazebo/link_states'
+            self.log.debug(f"available topics: {list(topics_dict.keys())}")
+            if want1 in topics_dict:
+                self.log.info(f"topic {want1} types: {topics_dict[want1]}")
+            else:
+                self.log.info(f"topic {want1} not present at startup")
+            if want2 in topics_dict:
+                self.log.info(f"topic {want2} types: {topics_dict[want2]}")
+            else:
+                self.log.info(f"topic {want2} not present at startup")
+        except Exception:
+            # non-fatal: diagnostic logging only
+            pass
+
         meas_topic = f'/vision_{self.landmark_color}/measurement'
         self.meas_pub = self.create_publisher(PointStamped, meas_topic, 10)
 
@@ -82,6 +103,58 @@ class LandmarkPositioner(Node):
         self.heartbeat_timer = self.create_timer(
             HEARTBEAT_PERIOD, self.heartbeat_cb
         )
+
+        # CSV recording parameters (no driving performed)
+        # Default csv_file is empty here; if not provided we set it to the
+        # workspace pictures folder below so we don't write to root or /tmp.
+        self.declare_parameter('record_data', False)
+        self.declare_parameter('csv_file', '')
+        self.record_data = bool(self.get_parameter('record_data').get_parameter_value().bool_value)
+        csv_param = str(self.get_parameter('csv_file').get_parameter_value().string_value)
+        if csv_param == '' or csv_param is None:
+            # default into workspace pictures folder (non-root)
+            self.csv_file = f"/home/hqh/ros2_ws/src/prob_rob_labs_ros_2/pictures/landmark_data_{self.landmark_color}.csv"
+        else:
+            self.csv_file = csv_param
+        self._csv_writer = None
+        self._csv_handle = None
+
+        if self.record_data:
+            try:
+                dirpath = os.path.dirname(self.csv_file)
+                if dirpath and not os.path.exists(dirpath):
+                    try:
+                        os.makedirs(dirpath, exist_ok=True)
+                    except Exception as e:
+                        self.log.error(f"failed to create directory {dirpath}: {e}")
+                        raise
+
+                new_file = not os.path.exists(self.csv_file)
+                # attempt to open file for append and test a write immediately
+                self._csv_handle = open(self.csv_file, 'a', newline='')
+                self._csv_writer = csv.writer(self._csv_handle)
+                if new_file:
+                    # write header
+                    self._csv_writer.writerow(['stamp', 'measured_d', 'measured_theta', 'true_d', 'true_theta', 'err_d', 'err_theta', 'color'])
+                    self._csv_handle.flush()
+
+                # write a startup test row so we can verify filesystem writes
+                try:
+                    import time as _time
+                    ts0 = _time.time()
+                    # test row uses zeros for numeric fields; it's harmless and easy to spot
+                    self._csv_writer.writerow([ts0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, str(self.landmark_color)])
+                    self._csv_handle.flush()
+                    self.log.info(f"recording measurements to {self.csv_file} (startup test row written)")
+                except Exception as e:
+                    self.log.error(f"failed to write startup test row to {self.csv_file}: {e}")
+                    raise
+
+                # diagnostic counter for how many rows we've written (includes the test row)
+                self._rows_written = 1
+            except Exception as e:
+                self.log.error(f"failed to open csv file {self.csv_file}: {e}")
+                self.record_data = False
 
         self.log.info(
             f'landmark_positioner initialized for color={self.landmark_color}'
@@ -217,6 +290,42 @@ class LandmarkPositioner(Node):
         self.log.info(
             f"d_err={err_d:.3f}, theta_err={err_theta:.3f}"
         )
+        # Record measurement and error to CSV if enabled
+        if getattr(self, '_csv_writer', None) and self.record_data:
+            try:
+                # prefer stamp.sec/nanosec but handle other representations
+                sec = getattr(stamp, 'sec', None)
+                nsec = getattr(stamp, 'nanosec', None)
+                if sec is None:
+                    sec = getattr(stamp, 'sec', 0)
+                if nsec is None:
+                    nsec = getattr(stamp, 'nsec', 0)
+                ts = float(sec) + float(nsec) * 1e-9
+                self._csv_writer.writerow([
+                    ts,
+                    float(measured_d),
+                    float(measured_theta),
+                    float(d_true),
+                    float(theta_true),
+                    float(err_d),
+                    float(err_theta),
+                    str(self.landmark_color),
+                ])
+                try:
+                    self._csv_handle.flush()
+                except Exception:
+                    pass
+                # increment and log diagnostics
+                try:
+                    self._rows_written += 1
+                    if self._rows_written == 1:
+                        self.log.info(f"first csv row written to {self.csv_file}")
+                    elif (self._rows_written % 50) == 0:
+                        self.log.info(f"{self._rows_written} rows written to {self.csv_file}")
+                except Exception:
+                    pass
+            except Exception as e:
+                self.log.error(f"failed to write csv row: {e}")
 
     @staticmethod
     def normalize_angle(angle: float) -> float:
@@ -232,15 +341,42 @@ class LandmarkPositioner(Node):
         cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
         return math.atan2(siny_cosp, cosy_cosp)
 
+    def __del__(self):
+        # ensure CSV handle closed on destruction
+        try:
+            if getattr(self, '_csv_handle', None):
+                try:
+                    self._csv_handle.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
 
 def main():
     rclpy.init()
     node = LandmarkPositioner()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        # user requested shutdown
+        pass
+    except Exception as e:
+        # log unexpected exceptions with traceback to aid debugging
+        try:
+            node.get_logger().error(f"Unhandled exception in spin: {e}", exc_info=True)
+        except Exception:
+            print(f"Unhandled exception in spin: {e}")
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            # rclpy may already be shutdown; ignore
+            pass
 
 
 if __name__ == '__main__':
