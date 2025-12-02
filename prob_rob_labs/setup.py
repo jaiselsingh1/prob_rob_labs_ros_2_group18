@@ -16,6 +16,7 @@ data_files=[
     (os.path.join('share', package_name, 'worlds'), glob('worlds/*.world')),
     (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     (os.path.join('share', package_name, 'launch'), launch_files),
+    (os.path.join('share', package_name, 'maps'), ['maps/landmarks_lab6.yaml']),
 ]
 
 setup(
@@ -41,7 +42,8 @@ setup(
             'image_mean_feature_x = image_mean_feature_x.image_mean_feature_x:main',
             'flaky_door_opener = flaky_door_opener.flaky_door_opener:main',
             'landmark_positioner = landmark_positioner.landmark_positioner:main',
-            'axis_identifier = axis_identifier.axis_identifier:main'
+            'axis_identifier = axis_identifier.axis_identifier:main',
+            'ekf_localization = ekf_localization.ekf_localization:main',
         ],
     }
 )
