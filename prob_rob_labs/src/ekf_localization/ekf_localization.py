@@ -7,6 +7,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import PointStamped
 
 
 @dataclass
@@ -65,8 +66,27 @@ class LandmarkEKFNode(Node):
             f"Loaded {len(colors)} landmarks: {colors}"
         )
 
-        # for subscribe & ekf in Assignment 2
+        # ---- Assignment 2: subscribe to vision measurements for each landmark color ----
+        self._measurement_subs = []
+        self.last_measurements = {}
 
+        for color, lm in self.landmarks_by_color.items():
+            topic = f"/vision_{color}/measurement"
+
+            sub = self.create_subscription(
+                PointStamped,
+                topic,
+                lambda msg, color=color, lm=lm: self._vision_measurement_callback(
+                    msg, color, lm
+                ),
+                10,
+            )
+            self._measurement_subs.append(sub)
+
+            self.get_logger().info(
+                f"Subscribed to {topic} for landmark color={color} "
+                f"at world position x={lm.x:.2f}, y={lm.y:.2f}"
+            )
 
 
 
@@ -105,6 +125,33 @@ class LandmarkEKFNode(Node):
             )
 
         return landmarks_by_color
+
+
+
+    def _vision_measurement_callback(self, msg: PointStamped, color: str, lm: Landmark):
+        """
+        - msg.point.x: distance
+        - msg.point.y: bearing
+        - color: of landmark
+        - lm: (lm.x, lm.y) of landmark
+        """
+
+        d = float(msg.point.x)
+        theta = float(msg.point.y)
+
+        self.last_measurements[color] = {
+            'stamp': msg.header.stamp,
+            'd': d,
+            'theta': theta,
+            'landmark': lm,
+        }
+
+        self.get_logger().info(
+            f"[measurement] color={color} d={d:.3f} m, theta={theta:.3f} rad "
+            f"(landmark world: x={lm.x:.2f}, y={lm.y:.2f})"
+        )
+
+
 
     def get_landmark_for_color(self, color: str):
         """ for correspondence mapping """
