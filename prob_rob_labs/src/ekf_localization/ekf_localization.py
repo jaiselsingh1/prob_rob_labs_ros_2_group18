@@ -2,17 +2,23 @@
 import os
 import math
 import yaml
-from dataclasses import dataclass
-
 import numpy as np
+from dataclasses import dataclass
 
 import rclpy
 from rclpy.node import Node
-from rclpy.parameter import Parameter
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 
+try:
+    from landmark_positioner.variance_model import make_variance_model
+except ImportError:
+    try:
+        from prob_rob_labs.landmark_positioner.variance_model import make_variance_model
+    except ImportError:
+        def make_variance_model(var_d, var_th):
+            return (lambda d: var_d, lambda th: var_th, lambda d, th: np.diag([var_d, var_th]))
 
 @dataclass
 class Landmark:
@@ -22,315 +28,199 @@ class Landmark:
     radius: float
     height: float
 
-
 class LandmarkEKFNode(Node):
-
     def __init__(self):
-        super().__init__('landmark_ekf')
+        super().__init__('ekf_localization')
 
-        # --- use_sim_time ---
-        if not self.has_parameter('use_sim_time'):
-            self.declare_parameter('use_sim_time', True)
-
+        self._declare_params()
+        
         use_sim_time = self.get_parameter('use_sim_time').get_parameter_value().bool_value
-        if use_sim_time:
-            self.get_logger().info('Using simulation time')
-        else:
-            self.get_logger().info('Using wall time')
+        self.get_logger().info(f"Using {'Simulation' if use_sim_time else 'Wall'} Time.")
 
-        # --- map_file ---
-        if not self.has_parameter('map_file'):
-            self.declare_parameter('map_file', '')
+        map_path = self._get_map_path()
+        self.landmarks = self._load_landmark_map(map_path)
+        self.get_logger().info(f"Loaded {len(self.landmarks)} landmarks for multi-fusion.")
 
-        map_file_param = (
-            self.get_parameter('map_file')
-            .get_parameter_value()
-            .string_value
-        )
-
-        if not map_file_param:
-            try:
-                share_dir = get_package_share_directory('prob_rob_labs')
-                map_file_param = os.path.join(
-                    share_dir, 'maps', 'landmarks_lab6.yaml'
-                )
-            except Exception as e:
-                self.get_logger().error(
-                    f"Failed to get default map path from package share: {e}"
-                )
-                raise
-
-        self.map_file = map_file_param
-        self.get_logger().info(f"Loading landmark map from: {self.map_file}")
-
-        # --- load landmark map ---
-        self.landmarks_by_color = self._load_landmark_map(self.map_file)
-        colors = list(self.landmarks_by_color.keys())
-        self.get_logger().info(
-            f"Loaded {len(colors)} landmarks: {colors}"
-        )
-
-        # --- EKF landmark color ---
-        if not self.has_parameter('ekf_landmark_color'):
-            self.declare_parameter('ekf_landmark_color', 'cyan')
-
-        self.ekf_landmark_color = (
-            self.get_parameter('ekf_landmark_color')
-            .get_parameter_value()
-            .string_value
-        )
-        self.get_logger().info(
-            f"EKF will use landmark color='{self.ekf_landmark_color}' for updates"
-        )
-
-        # --- EKF state and covariance ---
-        self.mu = np.zeros(3, dtype=float)
+        self.mu = np.zeros(3, dtype=float) 
         self.Sigma = np.eye(3, dtype=float) * 1e-3
 
-        # Motion noise Q
-        pos_noise = 0.01
-        yaw_noise = (5.0 * math.pi / 180.0) ** 2
-        self.Q = np.diag([pos_noise, pos_noise, yaw_noise])
+        self.alpha_pos = 0.01
+        self.alpha_yaw = (5.0 * math.pi / 180.0) ** 2
+        self.Q = np.diag([self.alpha_pos, self.alpha_pos, self.alpha_yaw])
 
-        # Measurement noise R (start with constant noise from Lab 5 variance_model.py)
         base_var_d = 1.761867e-02
         base_var_theta = 1.573656e-04
-        self.R_const = np.diag([base_var_d, base_var_theta])
+        self.sigma_d2, self.sigma_theta2, self.R_func = make_variance_model(base_var_d, base_var_theta)
 
-        # Odometry bookkeeping
-        self.have_odom = False
-        self.last_odom_pose = None  # (x, y, yaw)
+        self.state_time = None
+        self.initialized = False
+        self.last_v = 0.0
+        self.last_omega = 0.0
 
-        # ---  Assignment 3: subscribe to odometry for EKF prediction ---
-        self.odom_sub = self.create_subscription(
-            Odometry,
-            '/odom',
-            self._odom_callback,
-            50,
-        )
-
-        # ---- Assignment 2: subscribe to vision measurements for each landmark color ----
-        self._measurement_subs = []
-        self.last_measurements = {}
-
-        for color, lm in self.landmarks_by_color.items():
+        self.pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/ekf_pose', 10)
+        self.odom_sub = self.create_subscription(Odometry, '/odom', self._odom_callback, 50)
+        
+        self.vision_subs = []
+        for color, lm in self.landmarks.items():
             topic = f"/vision_{color}/measurement"
-
             sub = self.create_subscription(
-                PointStamped,
-                topic,
-                lambda msg, color=color, lm=lm: self._vision_measurement_callback(
-                    msg, color, lm
-                ),
-                10,
+                PointStamped, topic,
+                lambda msg, c=color, l=lm: self._vision_callback(msg, c, l),
+                10
             )
-            self._measurement_subs.append(sub)
+            self.vision_subs.append(sub)
+            self.get_logger().info(f"Subscribed to {topic}")
 
-            self.get_logger().info(
-                f"Subscribed to {topic} for landmark color={color} "
-                f"at world position x={lm.x:.2f}, y={lm.y:.2f}"
-            )
+    def _declare_params(self):
+        params = {'use_sim_time': True, 'map_file': ''}
+        for name, default in params.items():
+            if not self.has_parameter(name):
+                self.declare_parameter(name, default)
 
+    def _get_map_path(self):
+        path = self.get_parameter('map_file').get_parameter_value().string_value
+        if not path:
+            try:
+                share_dir = get_package_share_directory('prob_rob_labs')
+                path = os.path.join(share_dir, 'maps', 'landmarks_lab6.yaml')
+            except Exception:
+                pass
+        return path
 
+    def _load_landmark_map(self, path):
+        if not path or not os.path.exists(path):
+            return {}
+        try:
+            with open(path, 'r') as f:
+                data = yaml.safe_load(f)
+            lms = {}
+            entries = data.get('landmarks', []) if isinstance(data, dict) else data
+            for item in entries:
+                c = item['color']
+                lms[c] = Landmark(c, float(item['x']), float(item['y']), 
+                                  float(item.get('radius', 0.1)), float(item.get('height', 0.5)))
+            return lms
+        except Exception:
+            return {}
 
-    def _load_landmark_map(self, path: str):
-        if not os.path.exists(path):
-            self.get_logger().error(f"Map file does not exist: {path}")
-            raise FileNotFoundError(path)
+    @staticmethod
+    def _stamp_to_sec(stamp):
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
-        with open(path, 'r') as f:
-            data = yaml.safe_load(f)
+    @staticmethod
+    def _norm_angle(a):
+        return (a + math.pi) % (2 * math.pi) - math.pi
 
-        if isinstance(data, dict) and 'landmarks' in data:
-            entries = data['landmarks']
-        elif isinstance(data, list):
-            entries = data
+    def _publish_pose(self, stamp):
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = stamp
+        msg.header.frame_id = 'map'
+        msg.pose.pose.position.x = self.mu[0]
+        msg.pose.pose.position.y = self.mu[1]
+        
+        th = self.mu[2]
+        msg.pose.pose.orientation.z = math.sin(th * 0.5)
+        msg.pose.pose.orientation.w = math.cos(th * 0.5)
+
+        P = np.zeros((6, 6))
+        P[0,0] = self.Sigma[0,0]; P[0,1] = self.Sigma[0,1]; P[0,5] = self.Sigma[0,2]
+        P[1,0] = self.Sigma[1,0]; P[1,1] = self.Sigma[1,1]; P[1,5] = self.Sigma[1,2]
+        P[5,0] = self.Sigma[2,0]; P[5,1] = self.Sigma[2,1]; P[5,5] = self.Sigma[2,2]
+        msg.pose.covariance = P.flatten().tolist()
+
+        self.pose_pub.publish(msg)
+
+    def _predict(self, dt, v, omega):
+        if dt <= 0.0: return
+        x, y, th = self.mu
+        
+        if abs(omega) < 1e-5:
+            x_pred = x + v * dt * math.cos(th)
+            y_pred = y + v * dt * math.sin(th)
+            th_pred = th
         else:
-            raise ValueError(
-                "Unexpected YAML structure in landmark map. "
-                "Expected a 'landmarks' list or top-level list."
-            )
+            ratio = v / omega
+            x_pred = x + ratio * (math.sin(th + omega*dt) - math.sin(th))
+            y_pred = y + ratio * (math.cos(th) - math.cos(th + omega*dt))
+            th_pred = th + omega * dt
 
-        landmarks_by_color = {}
-        for lm in entries:
-            color = str(lm['color']).strip()
-            x = float(lm['x'])
-            y = float(lm['y'])
-            radius = float(lm.get('radius', 0.1))
-            height = float(lm.get('height', 0.5))
+        self.mu = np.array([x_pred, y_pred, self._norm_angle(th_pred)])
 
-            landmarks_by_color[color] = Landmark(
-                color=color,
-                x=x,
-                y=y,
-                radius=radius,
-                height=height,
-            )
+        F = np.eye(3)
+        F[0, 2] = -v * math.sin(th) * dt
+        F[1, 2] =  v * math.cos(th) * dt
+        Q_scaled = self.Q * dt
+        self.Sigma = F @ self.Sigma @ F.T + Q_scaled
 
-        return landmarks_by_color
-
-
-    @staticmethod
-    def _angle_normalize(angle: float) -> float:
-        """Wrap angle to [-pi, pi]."""
-        a = math.fmod(angle + math.pi, 2.0 * math.pi)
-        if a < 0.0:
-            a += 2.0 * math.pi
-        return a - math.pi
-
-    def _angle_diff(self, a: float, b: float) -> float:
-        """Compute a - b and wrap to [-pi, pi]."""
-        return self._angle_normalize(a - b)
-
-    @staticmethod
-    def _yaw_from_quat(q) -> float:
-        """Extract yaw from a geometry_msgs/Quaternion."""
-        x = q.x
-        y = q.y
-        z = q.z
-        w = q.w
-        siny_cosp = 2.0 * (w * z + x * y)
-        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        yaw = math.atan2(siny_cosp, cosy_cosp)
-        return yaw
-
-
-    # Odometry callback: EKF prediction step
-    def _odom_callback(self, msg: Odometry):
-        px = msg.pose.pose.position.x
-        py = msg.pose.pose.position.y
-        yaw = self._yaw_from_quat(msg.pose.pose.orientation)
-
-        if not self.have_odom:
-            # First odom message: initialize EKF state
-            self.mu[:] = [px, py, yaw]
-            self.last_odom_pose = (px, py, yaw)
-            self.have_odom = True
-            self.get_logger().info(
-                f"Initialized EKF state from odom: "
-                f"x={px:.2f}, y={py:.2f}, yaw={yaw:.2f} rad"
-            )
-            return
-
-        prev_x, prev_y, prev_yaw = self.last_odom_pose
-
-        dx = px - prev_x
-        dy = py - prev_y
-        dyaw = self._angle_diff(yaw, prev_yaw)
-
-        u = np.array([dx, dy, dyaw], dtype=float)
-
-        # EKF prediction
-        self.mu = self.mu + u
-        self.mu[2] = self._angle_normalize(self.mu[2])
-
-
-        self.Sigma = self.Sigma + self.Q
-
-        self.last_odom_pose = (px, py, yaw)
-
-
-    # Vision measurement callback: store measurement and trigger EKF update
-    def _vision_measurement_callback(self, msg: PointStamped, color: str, lm: Landmark):
-        """
-        - msg.point.x: distance (d)
-        - msg.point.y: bearing (theta)
-        - color: landmark color
-        - lm: landmark in world frame (lm.x, lm.y)
-        """
-
-        d = float(msg.point.x)
-        theta = float(msg.point.y)
-
-        self.last_measurements[color] = {
-            'stamp': msg.header.stamp,
-            'd': d,
-            'theta': theta,
-            'landmark': lm,
-        }
-
-        self.get_logger().info(
-            f"[measurement] color={color} d={d:.3f} m, theta={theta:.3f} rad "
-            f"(landmark world: x={lm.x:.2f}, y={lm.y:.2f})"
-        )
-
-        # If EKF state has not been initialized from odom, skip update
-        if not self.have_odom:
-            return
-
-        # In Assignment 3, only use one landmark color for EKF update
-        if color != self.ekf_landmark_color:
-            return
-
-        self._ekf_update_single_landmark(color, d, theta, lm)
-
-
-    # EKF measurement update for a single landmark
-    def _ekf_update_single_landmark(
-        self,
-        color: str,
-        d_meas: float,
-        theta_meas: float,
-        lm: Landmark,
-    ):
-        """
-        EKF measurement update using a single landmark.
-
-        State: mu = [x, y, theta]^T
-        Landmark: (lm.x, lm.y) in world frame
-        Measurement:
-          z = [d_meas, theta_meas]^T
-        Measurement model:
-          d_hat     = sqrt((x_l - x)^2 + (y_l - y)^2)
-          theta_hat = atan2(y_l - y, x_l - x) - theta
-        """
-
-        x, y, yaw = self.mu
-
+    def _update(self, d_meas, th_meas, lm, stamp):
+        x, y, th = self.mu
         dx = lm.x - x
         dy = lm.y - y
-        q = dx * dx + dy * dy
-
-        if q < 1e-6:
-            # Too close, avoid division by zero
-            self.get_logger().warn(
-                f"Landmark {color} is extremely close to the robot; skipping update."
-            )
-            return
+        q = dx**2 + dy**2
+        
+        # Avoid Singularity
+        if q < 1e-4: return
 
         d_hat = math.sqrt(q)
-        theta_hat = self._angle_normalize(math.atan2(dy, dx) - yaw)
+        th_hat = self._norm_angle(math.atan2(dy, dx) - th)
 
-        # Measurement vector and prediction
-        z = np.array([d_meas, theta_meas], dtype=float)
-        z_hat = np.array([d_hat, theta_hat], dtype=float)
+        y_res = np.array([d_meas - d_hat, self._norm_angle(th_meas - th_hat)])
+        H = np.array([[-dx/d_hat, -dy/d_hat, 0.0], [ dy/q, -dx/q, -1.0]])
 
-        # Residual (wrap bearing residual)
-        y_res = z - z_hat
-        y_res[1] = self._angle_normalize(y_res[1])
-
-        # Measurement Jacobian H
-        d = d_hat
-        H = np.array([
-            [-dx / d,      -dy / d,        0.0],
-            [ dy / q,      -dx / q,       -1.0],
-        ])
-
-        # EKF update
-        S = H @ self.Sigma @ H.T + self.R_const
-        K = self.Sigma @ H.T @ np.linalg.inv(S)
+        try:
+            R = self.R_func(d_meas, th_meas)
+            S = H @ self.Sigma @ H.T + R
+            K = self.Sigma @ H.T @ np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            return
 
         self.mu = self.mu + K @ y_res
-        self.mu[2] = self._angle_normalize(self.mu[2])
+        self.mu[2] = self._norm_angle(self.mu[2])
+        self.Sigma = (np.eye(3) - K @ H) @ self.Sigma
 
-        I = np.eye(3)
-        self.Sigma = (I - K @ H) @ self.Sigma
+        self.get_logger().info(f"Update {lm.color}: mu=[{self.mu[0]:.2f}, {self.mu[1]:.2f}, {self.mu[2]:.2f}]")
+        self._publish_pose(stamp)
 
-        self.get_logger().info(
-            f"[EKF update] color={color} -> "
-            f"mu = [x={self.mu[0]:.2f}, y={self.mu[1]:.2f}, yaw={self.mu[2]:.2f} rad]"
-        )
+    def _odom_callback(self, msg):
+        t_now = self._stamp_to_sec(msg.header.stamp)
+        v = msg.twist.twist.linear.x
+        w = msg.twist.twist.angular.z
+        self.last_v = v
+        self.last_omega = w
 
+        if not self.initialized:
+            return
+
+        dt = t_now - self.state_time
+        if dt > 0.0:
+            self._predict(dt, v, w)
+            self.state_time = t_now
+            self._publish_pose(msg.header.stamp)
+            self.get_logger().info(f"Predicting (v={v:.2f}, w={w:.2f})...", throttle_duration_sec=2.0)
+
+    def _vision_callback(self, msg, color, lm):
+        t_now = self._stamp_to_sec(msg.header.stamp)
+
+        if not self.initialized:
+            self.state_time = t_now
+            self.initialized = True
+            self.get_logger().info(f"System initialized at time {t_now:.2f}")
+            return
+
+        dt = t_now - self.state_time
+        
+        # Time tolerance for late packets
+        if dt > 0.0:
+            self._predict(dt, self.last_v, self.last_omega)
+            self.state_time = t_now
+        elif dt < 0.0:
+            if dt > -3.0: 
+                pass 
+            else:
+                return
+
+        # Update with any landmark
+        self._update(msg.point.x, msg.point.y, lm, msg.header.stamp)
 
 def main(args=None):
     rclpy.init(args=args)
@@ -342,7 +232,6 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()
