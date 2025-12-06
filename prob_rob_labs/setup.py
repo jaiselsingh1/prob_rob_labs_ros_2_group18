@@ -45,6 +45,7 @@ setup(
             'axis_identifier = axis_identifier.axis_identifier:main',
             'ekf_localization = ekf_localization.ekf_localization:main',
             'ekf_accuracy = ekf_accuracy.ekf_accuracy:main',
+            'map_odom_publisher = map_odom_publisher.map_odom_publisher:main',
         ],
     }
 )
