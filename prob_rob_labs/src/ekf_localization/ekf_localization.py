@@ -214,7 +214,7 @@ class LandmarkEKFNode(Node):
             self._predict(dt, self.last_v, self.last_omega)
             self.state_time = t_now
         elif dt < 0.0:
-            if dt > -3.0: 
+            if dt > -2.0: 
                 pass 
             else:
                 return
